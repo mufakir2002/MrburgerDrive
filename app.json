@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "mr-burger-driver",
+    "slug": "mr-burger-driver",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#111827"
+      },
+      "package": "com.mrburgerapp.mrburgerdriver"
+    }
+  }
+}
