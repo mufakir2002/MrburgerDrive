@@ -1,0 +1,8 @@
+@"
+node_modules/
+.expo/
+*.apk
+*.aab
+*.jks
+.env
+"@ | Set-Content -Encoding ascii .gitignore
