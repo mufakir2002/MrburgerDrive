@@ -5,4 +5,5 @@ node_modules/
 *.aab
 *.jks
 .env
-"@ | Set-Content -Encoding ascii .gitignore
+"@ | Set-Content -Encoding ascii .gitignore/android
+/ios
