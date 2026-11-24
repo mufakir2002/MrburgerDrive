@@ -1,73 +1,67 @@
 import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 import { Platform } from 'react-native';
+import { savePushToken } from './api';
 
-// Configure notification behavior
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
     shouldPlaySound: true,
-    shouldSetBadge: true,
+    shouldSetBadge: false,
   }),
 });
 
-/**
- * Register for push notifications (Expo Go compatible)
- */
+async function ensureChannel() {
+  if (Platform.OS !== 'android') return;
+  await Notifications.setNotificationChannelAsync('orders', {
+    name: 'New orders',
+    importance: Notifications.AndroidImportance.MAX,
+    sound: 'default',
+    vibrationPattern: [0, 400, 200, 400],
+    lightColor: '#FFC107',
+  });
+}
+
+// Registers this phone for push so dispatch can notify the driver. Safe to call repeatedly.
 export async function registerForPushNotifications() {
-  let token;
-  
   try {
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
-    let finalStatus = existingStatus;
-    
-    if (existingStatus !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
-    }
-    
-    if (finalStatus !== 'granted') {
-      console.log('❌ Failed to get push token for push notification!');
-      return null;
-    }
-    
-    token = (await Notifications.getExpoPushTokenAsync()).data;
-    console.log('✅ Push token:', token);
+    await ensureChannel();
+    if (!Device.isDevice) return null;
+    const existing = await Notifications.getPermissionsAsync();
+    let status = existing.status;
+    if (status !== 'granted') status = (await Notifications.requestPermissionsAsync()).status;
+    if (status !== 'granted') return null;
+    const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
+    if (!projectId) return null;
+    const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+    if (token) await savePushToken(token);
     return token;
-  } catch (error) {
-    console.log('❌ Error registering for notifications:', error);
+  } catch (e) {
     return null;
   }
 }
 
-/**
- * Setup foreground notification listener
- */
-export function setupForegroundNotificationListener(navigationRef) {
-  return Notifications.addNotificationReceivedListener(notification => {
-    console.log('🔔 Notification received in foreground:', notification);
-  });
+export function setupForegroundNotificationListener() {
+  return Notifications.addNotificationReceivedListener(() => {});
 }
 
-/**
- * Setup notification response listener (when user taps notification)
- */
+const openOrder = (navigationRef, data) => {
+  const id = data?.orderId || data?.order_id;
+  if (id && navigationRef?.isReady?.()) navigationRef.navigate('OrderDetails', { orderId: id });
+};
+
 export function setupNotificationResponseListener(navigationRef) {
-  return Notifications.addNotificationResponseReceivedListener(response => {
-    console.log('👆 User tapped notification:', response);
+  return Notifications.addNotificationResponseReceivedListener((r) => {
+    openOrder(navigationRef, r.notification.request.content.data);
   });
 }
 
-/**
- * Simulate incoming notification (for testing in Expo Go)
- */
-export function simulateIncomingNotification(title, body, data = {}) {
-  Notifications.scheduleNotificationAsync({
-    content: {
-      title,
-      body,
-      data,
-      sound: true,
-    },
-    trigger: null, // Show immediately
-  });
+// App opened by tapping a notification while it was closed
+export async function handleInitialNotification(navigationRef) {
+  try {
+    const r = await Notifications.getLastNotificationResponseAsync();
+    if (r) openOrder(navigationRef, r.notification.request.content.data);
+  } catch (e) { /* ignore */ }
 }

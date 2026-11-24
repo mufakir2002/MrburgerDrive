@@ -1,123 +1,108 @@
-import React, { createContext, useState, useContext, useEffect } from 'react';
+import React, { createContext, useState, useContext, useEffect, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { loginDriver } from '../services/api';
+import { loginDriver, getProfile, setUnauthorizedHandler, setOnlineStatus } from '../services/api';
+import { saveToken, getToken, deleteToken } from '../utils/secureStorage';
+import { registerForPushNotifications } from '../services/notifications';
+import { stopTracking } from '../services/locationTracker';
 
 const AuthContext = createContext();
+const USER_KEY = 'userData';
 
-// ✅ Built-in JWT decoder (no external package needed!)
-// JWT format: header.payload.signature (all base64 encoded)
 const decodeJWT = (token) => {
   try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-    
-    // Base64 decode the payload (middle part)
-    const payload = parts[1];
-    // Add padding if needed for proper base64 decoding
-    const paddedPayload = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const decoded = atob(paddedPayload);
-    return JSON.parse(decoded);
-  } catch (error) {
-    console.error('❌ JWT decode error:', error);
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = part + '='.repeat((4 - (part.length % 4)) % 4);
+    return JSON.parse(atob(padded));
+  } catch (e) {
     return null;
   }
 };
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
-  const [token, setToken] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(true);   // only for the first app start
+  const [signingIn, setSigningIn] = useState(false);
 
-  useEffect(() => {
-    const checkStoredAuth = async () => {
-      try {
-        console.log('🏁 Checking stored auth...');
-        const storedToken = await AsyncStorage.getItem('driverToken');
-        const storedUser = await AsyncStorage.getItem('userData');
-        
-        if (storedToken && storedUser) {
-          console.log('📦 Stored token: Found');
-          console.log('📦 Stored user: Found');
-          
-          // ✅ CRITICAL FIX: Check if token is expired before auto-login
-          const decoded = decodeJWT(storedToken);
-          
-          if (decoded && decoded.exp) {
-            const currentTime = Math.floor(Date.now() / 1000); // Current time in seconds
-            
-            if (decoded.exp < currentTime) {
-              console.log('⚠️ Token is EXPIRED. Clearing storage and showing login...');
-              console.log(`   Expired at: ${new Date(decoded.exp * 1000).toLocaleString()}`);
-              console.log(`   Current time: ${new Date(currentTime * 1000).toLocaleString()}`);
-              await AsyncStorage.clear();
-              setUser(null);
-              setToken(null);
-              setLoading(false);
-              return;
-            }
-            
-            const expiresIn = Math.floor((decoded.exp - currentTime) / 3600);
-            console.log(`✅ Token is valid. Auto-login successful. Expires in ${expiresIn} hours.`);
-            setToken(storedToken);
-            setUser(JSON.parse(storedUser));
-          } else {
-            console.log('❌ Token is corrupted or unreadable. Clearing storage...');
-            await AsyncStorage.clear();
-            setUser(null);
-            setToken(null);
-          }
-        } else {
-          console.log('ℹ️ No stored auth found. Showing login screen.');
-        }
-      } catch (error) {
-        console.error('Failed to load auth state', error);
-        await AsyncStorage.clear();
-        setUser(null);
-        setToken(null);
-      } finally {
-        console.log('🔄 Setting loading to false');
-        setLoading(false);
-      }
-    };
-    checkStoredAuth();
+  const logout = useCallback(async () => {
+    try { await setOnlineStatus(false); } catch (e) { /* best effort */ }
+    try { await stopTracking(); } catch (e) { /* ignore */ }
+    await deleteToken().catch(() => {});
+    await AsyncStorage.multiRemove([USER_KEY, 'mrb_tracked_order_ids', 'mrb_driver_online']).catch(() => {});
+    setUser(null);
   }, []);
 
-  const login = async (phoneNumber, password) => {
-    try {
-      setLoading(true);
-      const response = await loginDriver({ phone_number: phoneNumber, password });
-      
-      if (response.data.success) {
-        const userData = response.data.data.user;
-        const authToken = response.data.data.token;
-        
-        setUser(userData);
-        setToken(authToken);
-        
-        await AsyncStorage.setItem('driverToken', authToken);
-        await AsyncStorage.setItem('userData', JSON.stringify(userData));
-        
-        console.log('✅ Login successful! Fresh token saved.');
-        return { success: true };
+  // Any 401 from the server means the session is over.
+  useEffect(() => {
+    setUnauthorizedHandler(() => { logout(); });
+    return () => setUnauthorizedHandler(null);
+  }, [logout]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const token = await getToken();
+        const cached = await AsyncStorage.getItem(USER_KEY);
+        if (token && cached) {
+          const exp = decodeJWT(token)?.exp;
+          if (exp && exp * 1000 < Date.now()) {
+            await logout();
+          } else {
+            setUser(JSON.parse(cached));          // open the app immediately, even offline
+            registerForPushNotifications();
+            // Refresh the profile quietly; a 401 logs out via the handler, network errors are ignored.
+            getProfile().then((r) => {
+              const fresh = r?.data?.data;
+              if (fresh?.name) {
+                setUser((u) => {
+                  const merged = { ...u, name: fresh.name };
+                  AsyncStorage.setItem(USER_KEY, JSON.stringify(merged)).catch(() => {});
+                  return merged;
+                });
+              }
+            }).catch(() => {});
+          }
+        }
+      } catch (e) {
+        // A storage hiccup must not wipe the saved login
+      } finally {
+        setLoading(false);
       }
-      return { success: false, message: response.data.message || 'Login failed' };
+    })();
+  }, [logout]);
+
+  const login = async (phoneNumber, password) => {
+    setSigningIn(true);
+    try {
+      const response = await loginDriver({ phone_number: String(phoneNumber).trim(), password });
+      if (!response.data.success) return { success: false, message: response.data.message || 'Login failed' };
+      const { user: u, token } = response.data.data;
+      if (u?.role && u.role !== 'driver') {
+        return { success: false, message: 'This account is not a driver account.' };
+      }
+      await saveToken(token);
+      await AsyncStorage.setItem(USER_KEY, JSON.stringify(u));
+      setUser(u);
+      registerForPushNotifications();
+      return { success: true };
     } catch (error) {
-      console.error('💥 Login error:', error);
-      return { success: false, message: error.response?.data?.message || 'Network error' };
+      if (error.response?.data?.message) return { success: false, message: error.response.data.message };
+      if (error.code === 'ECONNABORTED') return { success: false, message: 'The server took too long to respond. Try again.' };
+      return { success: false, message: 'Cannot reach the server. Check your internet connection.' };
     } finally {
-      setLoading(false);
+      setSigningIn(false);
     }
   };
 
-  const logout = async () => {
-    await AsyncStorage.clear();
-    setUser(null);
-    setToken(null);
-    console.log('👋 Logged out successfully.');
+  const updateUserData = async (fields) => {
+    setUser((prev) => {
+      const next = { ...prev, ...fields };
+      AsyncStorage.setItem(USER_KEY, JSON.stringify(next)).catch(() => {});
+      return next;
+    });
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, signingIn, login, logout, updateUserData }}>
       {children}
     </AuthContext.Provider>
   );

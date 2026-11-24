@@ -1,176 +1,129 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, RefreshControl, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAuth } from '../context/AuthContext';
-import { getDriverOrderHistory } from '../services/api';
-import { ArrowLeft, Package, Clock, CheckCircle, MapPin } from 'lucide-react-native';
+import { Clock, MapPin, Inbox, Banknote } from 'lucide-react-native';
+import { getHistory } from '../services/api';
+import { C, shadow } from '../theme';
+import { money, timeOf, dateOf, apiError } from '../utils/format';
+import { Header, StatusBadge, Chip, Empty } from '../components/ui';
 
-export default function MyOrdersScreen({ navigation }) {
-  const { token } = useAuth();
+const STATUSES = [['all', 'All'], ['active', 'Pending'], ['delivered', 'Completed'], ['cancelled', 'Cancelled']];
+const PERIODS = [['today', 'Today'], ['week', '7 days'], ['month', 'This month'], ['all', 'All time']];
+const PAGE = 30;
+
+export default function MyOrdersScreen({ navigation, route }) {
+  const [status, setStatus] = useState(route.params?.status || 'all');
+  const [period, setPeriod] = useState(route.params?.period || 'week');
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [activeFilter, setActiveFilter] = useState('all'); // 'all', 'pending', 'delivered'
+  const [refreshing, setRefreshing] = useState(false);
+  const [more, setMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [error, setError] = useState('');
+  const reqId = useRef(0);
 
-  useEffect(() => {
-    fetchOrders();
-  }, [activeFilter]);
-
-  const fetchOrders = async () => {
+  const load = useCallback(async (reset = true) => {
+    const my = ++reqId.current;
     try {
-      setLoading(true);
-      const res = await getDriverOrderHistory(token, activeFilter);
-      setOrders(res.data.data || []);
-    } catch (err) {
-      console.error('Failed to fetch orders:', err);
+      if (!reset) setMore(true);
+      const res = await getHistory({ status, period, limit: PAGE, offset: reset ? 0 : orders.length });
+      if (my !== reqId.current) return; // a newer filter was chosen meanwhile
+      setOrders((prev) => (reset ? res.data.data : [...prev, ...res.data.data]));
+      setHasMore(!!res.data.hasMore);
+      setError('');
+    } catch (e) {
+      if (my === reqId.current) setError(apiError(e));
     } finally {
-      setLoading(false);
+      if (my === reqId.current) { setLoading(false); setRefreshing(false); setMore(false); }
     }
-  };
+  }, [status, period, orders.length]);
 
-  const getStatusBadge = (status) => {
-    const styles = {
-      'ASSIGNED': { bg: '#3B82F6', text: 'Assigned' },
-      'ON_THE_WAY': { bg: '#F59E0B', text: 'On The Way' },
-      'DELIVERED': { bg: '#10B981', text: 'Delivered' },
-      'CANCELLED': { bg: '#EF4444', text: 'Cancelled' },
-    };
-    return styles[status] || { bg: '#6B7280', text: status };
-  };
+  useEffect(() => { setLoading(true); load(true); /* eslint-disable-next-line */ }, [status, period]);
 
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  };
+  const total = orders.reduce((a, o) => a + (o.status === 'DELIVERED' ? Number(o.commission) : 0), 0);
 
-  const formatTime = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const renderOrder = ({ item }) => {
-    const statusBadge = getStatusBadge(item.status);
-    
-    return (
-      <View style={styles.orderCard}>
-        <View style={styles.orderHeader}>
-          <View style={styles.orderInfo}>
-            <Text style={styles.orderNumber}>#{item.order_number}</Text>
-            <View style={styles.dateTime}>
-              <Clock size={12} color="#9CA3AF" />
-              <Text style={styles.dateText}>{formatDate(item.created_at)} • {formatTime(item.created_at)}</Text>
-            </View>
-          </View>
-          <View style={[styles.statusBadge, { backgroundColor: statusBadge.bg }]}>
-            <Text style={styles.statusText}>{statusBadge.text}</Text>
-          </View>
+  const renderItem = ({ item }) => (
+    <TouchableOpacity style={s.card} activeOpacity={0.85} onPress={() => navigation.navigate('OrderDetails', { order: item })}>
+      <View style={s.top}>
+        <View style={{ flex: 1 }}>
+          <Text style={s.no}>#{item.order_number}</Text>
+          <View style={s.time}><Clock size={12} color={C.mute} /><Text style={s.timeText}>{dateOf(item.updated_at)} · {timeOf(item.updated_at)}</Text></View>
         </View>
-
-        <View style={styles.orderBody}>
-          <View style={styles.customerInfo}>
-            <Text style={styles.customerName}>{item.customer_name}</Text>
-            <View style={styles.addressRow}>
-              <MapPin size={14} color="#6B7280" />
-              <Text style={styles.addressText} numberOfLines={2}>{item.delivery_address}</Text>
-            </View>
-          </View>
-          <Text style={styles.amount}>${Number(item.total_amount).toFixed(2)}</Text>
-        </View>
+        <StatusBadge status={item.status} />
       </View>
-    );
-  };
+      <Text style={s.cust}>{item.customer_name}</Text>
+      <View style={s.addrRow}><MapPin size={14} color={C.mute} /><Text style={s.addr} numberOfLines={1}>{item.delivery_address}</Text></View>
+      <View style={s.bottom}>
+        <View style={s.amtRow}>
+          {item.payment_method_code === 'CASH' ? <Banknote size={15} color={C.amber} /> : null}
+          <Text style={s.amt}>{money(item.total_amount)}</Text>
+        </View>
+        {item.status === 'DELIVERED' ? <Text style={s.comm}>+{money(item.commission)} earned</Text> : null}
+      </View>
+    </TouchableOpacity>
+  );
 
   return (
-    <SafeAreaView style={styles.container} edges={['top', 'left', 'right', 'bottom']}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <ArrowLeft size={24} color="#fff" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>My Orders</Text>
-        <View style={{ width: 24 }} />
+    <SafeAreaView style={s.container} edges={['top', 'left', 'right', 'bottom']}>
+      <Header title="My Orders" onBack={() => navigation.goBack()} />
+      <View style={s.filters}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+          {STATUSES.map(([k, l]) => <Chip key={k} label={l} active={status === k} onPress={() => setStatus(k)} />)}
+        </ScrollView>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[s.chipRow, { marginTop: 8 }]}>
+          {PERIODS.map(([k, l]) => <Chip key={k} label={l} active={period === k} onPress={() => setPeriod(k)} />)}
+        </ScrollView>
       </View>
 
-      {/* Filter Tabs */}
-      <View style={styles.filterContainer}>
-        <TouchableOpacity 
-          style={[styles.filterTab, activeFilter === 'all' && styles.filterTabActive]} 
-          onPress={() => setActiveFilter('all')}
-        >
-          <Text style={[styles.filterText, activeFilter === 'all' && styles.filterTextActive]}>All</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.filterTab, activeFilter === 'pending' && styles.filterTabActive]} 
-          onPress={() => setActiveFilter('pending')}
-        >
-          <Text style={[styles.filterText, activeFilter === 'pending' && styles.filterTextActive]}>Pending</Text>
-        </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.filterTab, activeFilter === 'delivered' && styles.filterTabActive]} 
-          onPress={() => setActiveFilter('delivered')}
-        >
-          <Text style={[styles.filterText, activeFilter === 'delivered' && styles.filterTextActive]}>Delivered</Text>
-        </TouchableOpacity>
-      </View>
+      {!loading && orders.length > 0 && (
+        <View style={s.summary}>
+          <Text style={s.summaryText}>{orders.length}{hasMore ? '+' : ''} order{orders.length === 1 ? '' : 's'}</Text>
+          {total > 0 ? <Text style={s.summaryEarn}>Earned {money(total)}</Text> : null}
+        </View>
+      )}
 
       {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#FFC107" />
-        </View>
-      ) : orders.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Package size={64} color="#4B5563" />
-          <Text style={styles.emptyTitle}>No orders found</Text>
-          <Text style={styles.emptyText}>
-            {activeFilter === 'all' ? 'You haven\'t completed any deliveries yet.' : `No ${activeFilter} orders.`}
-          </Text>
-        </View>
+        <ActivityIndicator style={{ marginTop: 50 }} size="large" color="#FFC107" />
       ) : (
         <FlatList
           data={orders}
-          keyExtractor={(item) => item.id}
-          renderItem={renderOrder}
-          contentContainerStyle={styles.listContent}
-          showsVerticalScrollIndicator={false}
+          keyExtractor={(i) => String(i.id)}
+          renderItem={renderItem}
+          contentContainerStyle={{ padding: 16, paddingTop: 6, flexGrow: 1 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(true); }} tintColor="#FFC107" />}
+          onEndReachedThreshold={0.4}
+          onEndReached={() => { if (hasMore && !more && !loading) load(false); }}
+          ListFooterComponent={more ? <ActivityIndicator style={{ margin: 16 }} color="#FFC107" /> : null}
+          ListEmptyComponent={
+            <Empty
+              icon={<Inbox size={36} color={C.mute} />}
+              title={error ? 'Could not load orders' : 'No orders here'}
+              text={error || 'Try a different filter or time range.'}
+            />
+          }
         />
       )}
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#111827' },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 24, paddingVertical: 20, borderBottomWidth: 1, borderBottomColor: '#1F2937' },
-  backBtn: { padding: 4 },
-  headerTitle: { fontSize: 18, fontWeight: '800', color: '#fff' },
-  
-  filterContainer: { flexDirection: 'row', paddingHorizontal: 24, paddingVertical: 16, gap: 12, borderBottomWidth: 1, borderBottomColor: '#1F2937' },
-  filterTab: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: '#1F2937', alignItems: 'center' },
-  filterTabActive: { backgroundColor: '#FFC107' },
-  filterText: { fontSize: 14, fontWeight: '700', color: '#9CA3AF' },
-  filterTextActive: { color: '#111827' },
-  
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  
-  listContent: { padding: 24 },
-  orderCard: { backgroundColor: '#1F2937', borderRadius: 16, padding: 20, marginBottom: 16, borderWidth: 1, borderColor: '#374151' },
-  
-  orderHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 },
-  orderInfo: { flex: 1 },
-  orderNumber: { fontSize: 18, fontWeight: '800', color: '#fff', marginBottom: 4 },
-  dateTime: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  dateText: { fontSize: 12, color: '#9CA3AF' },
-  
-  statusBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
-  statusText: { fontSize: 11, fontWeight: '700', color: '#fff', textTransform: 'uppercase' },
-  
-  orderBody: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
-  customerInfo: { flex: 1, marginRight: 16 },
-  customerName: { fontSize: 15, fontWeight: '700', color: '#fff', marginBottom: 6 },
-  addressRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 4 },
-  addressText: { flex: 1, fontSize: 13, color: '#9CA3AF', lineHeight: 18 },
-  
-  amount: { fontSize: 18, fontWeight: '800', color: '#FFC107' },
-  
-  emptyContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40 },
-  emptyTitle: { fontSize: 18, fontWeight: '700', color: '#fff', marginTop: 16, marginBottom: 8 },
-  emptyText: { fontSize: 14, color: '#9CA3AF', textAlign: 'center', lineHeight: 20 }
+const s = StyleSheet.create({
+  container: { flex: 1, backgroundColor: C.bg },
+  filters: { paddingTop: 14, paddingBottom: 6 },
+  chipRow: { paddingHorizontal: 16, gap: 8 },
+  summary: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 8 },
+  summaryText: { color: C.sub, fontWeight: '700', fontSize: 13 },
+  summaryEarn: { color: C.green, fontWeight: '900', fontSize: 13 },
+  card: { backgroundColor: '#fff', borderRadius: 18, padding: 14, marginBottom: 10, ...shadow },
+  top: { flexDirection: 'row', alignItems: 'center' },
+  no: { fontSize: 16, fontWeight: '900', color: C.ink },
+  time: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 3 },
+  timeText: { fontSize: 12, color: C.mute, fontWeight: '600' },
+  cust: { fontSize: 14.5, fontWeight: '800', color: C.ink, marginTop: 12 },
+  addrRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  addr: { flex: 1, fontSize: 13, color: C.sub },
+  bottom: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.line },
+  amtRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  amt: { fontSize: 15, fontWeight: '900', color: C.ink },
+  comm: { fontSize: 13, fontWeight: '900', color: C.green },
 });

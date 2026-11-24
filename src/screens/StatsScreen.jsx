@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../context/AuthContext';
 import { getDriverStats } from '../services/api';
 import { Award, Star, Package, DollarSign, ArrowLeft } from 'lucide-react-native';
 
 export default function StatsScreen({ navigation }) {
-  const { token, user } = useAuth();
+  const { user } = useAuth();
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -16,7 +16,10 @@ export default function StatsScreen({ navigation }) {
 
   const fetchStats = async () => {
     try {
-      const res = await getDriverStats(token);
+      // ✅ getDriverStats takes no arguments — the axios interceptor attaches
+      // the token automatically. The old call passed `token` here, which
+      // was silently ignored by the function (harmless, but misleading).
+      const res = await getDriverStats();
       setStats(res.data.data);
     } catch (err) {
       console.error('Failed to fetch stats:', err);
